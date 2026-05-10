@@ -24,10 +24,7 @@ function loadLocalEnvFile(filePath) {
     const key = trimmed.slice(0, equalsIndex).trim();
     let value = trimmed.slice(equalsIndex + 1).trim();
 
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
 
@@ -41,44 +38,63 @@ loadLocalEnvFile(path.resolve(process.cwd(), ".env"));
 loadLocalEnvFile(path.resolve(process.cwd(), ".env.local"));
 
 const DEFAULT_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2";
-const DEFAULT_RESOLVER_MODEL = process.env.OPENAI_RESOLVER_MODEL || "gpt-5.4-mini";
+const DEFAULT_ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL || process.env.OPENAI_RESOLVER_MODEL || "gpt-5.4-mini";
+const DEFAULT_ANSWER_MODEL = process.env.OPENAI_ANSWER_MODEL || DEFAULT_ROUTER_MODEL;
 
-const QUESTIONS = {
-  check_transfer_status: {
-    title: "How do I check my transfer's status?",
-    url: "https://wise.com/help/articles/2452305/how-do-i-check-my-transfers-status",
-    answer:
-      "Log in to your Wise account, go to Home, and select the transfer you want to track. The tracker shows the current stage, such as being processed, money received, or transfer sent.",
-  },
-  money_arrival_time: {
-    title: "When will my money arrive?",
-    url: "https://wise.com/help/articles/2941900/when-will-my-money-arrive",
-    answer:
-      "Wise shows an estimate for arrival time. If it says due today, it usually means the money should already be there, but bank processing, weekends, holidays, or incorrect details can delay it.",
-  },
-  complete_but_not_arrived: {
-    title: "Why does it say my transfer's complete when the money hasn't arrived yet?",
-    url: "https://wise.com/help/articles/2977950/why-does-it-say-my-transfers-complete-when-the-money-hasnt-arrived-yet",
-    answer:
-      "Complete means Wise has sent the money to the recipient bank. The bank may still be processing it, or the recipient may need to check the sender name, reference number, currency, and amount. A receipt can help.",
-  },
-  transfer_delayed: {
-    title: "Why is my transfer taking longer than the estimate?",
-    url: "https://wise.com/help/articles/2977951/why-is-my-transfer-taking-longer-than-the-estimate",
-    answer:
-      "Delays can happen because Wise is still waiting for the money, a security check is running, the recipient bank is slow, or the recipient details are wrong. Weekends and public holidays can also slow things down.",
-  },
-  proof_of_payment: {
-    title: "What is a proof of payment?",
-    url: "https://wise.com/help/articles/2932689/what-is-a-proof-of-payment",
-    answer:
-      "A proof of payment is a document that shows you sent money from your bank account, such as a bank statement or screenshot. It should show your name, bank name, Wise details, date, amount, currency, and reference.",
-  },
-  banking_partner_reference: {
-    title: "What's a banking partner reference number?",
-    url: "https://wise.com/help/articles/2977938/whats-a-banking-partner-reference-number",
-    answer:
-      "A banking partner reference number helps your recipient's bank find the payment after the transfer is complete. Give it to your recipient if Wise provides one.",
+const FAQ_PATH = path.resolve(process.cwd(), "data", "wiseFaq.json");
+const FAQ_SOURCE = JSON.parse(fs.readFileSync(FAQ_PATH, "utf8"));
+
+const TITLE_TO_INTENT = new Map([
+  ["how do i check my transfer's status?", "check_transfer_status"],
+  ["when will my money arrive?", "money_arrival_time"],
+  ["why does it say my transfer's complete when the money hasn't arrived yet?", "complete_but_not_arrived"],
+  ["why is my transfer taking longer than the estimate?", "transfer_delayed"],
+  ["what is a proof of payment?", "proof_of_payment"],
+  ["what's a banking partner reference number?", "banking_partner_reference"],
+]);
+
+const ROUTE_SCHEMA = {
+  type: "json_schema",
+  name: "wise_transfer_route",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      category: {
+        type: "string",
+        enum: ["conversational", "supported_faq", "wise_unsupported", "off_topic", "unclear"],
+      },
+      intent: {
+        type: "string",
+        enum: [
+          "check_transfer_status",
+          "money_arrival_time",
+          "complete_but_not_arrived",
+          "transfer_delayed",
+          "proof_of_payment",
+          "banking_partner_reference",
+          "none",
+        ],
+      },
+      conversationalType: {
+        type: "string",
+        enum: [
+          "greeting",
+          "thanks",
+          "goodbye",
+          "capability_question",
+          "repeat_request",
+          "clarify_request",
+          "frustration_or_correction",
+          "none",
+        ],
+      },
+      rationale: {
+        type: "string",
+      },
+    },
+    required: ["category", "intent", "conversationalType", "rationale"],
   },
 };
 
@@ -93,102 +109,6 @@ const CONVERSATIONAL_REPLIES = {
   frustration_or_correction:
     "Understood. Please restate your Wise transfer tracking question, and I will help with that.",
 };
-
-const CONVERSATIONAL_PATTERNS = [
-  { type: "thanks", patterns: ["thank you", "thanks", "thx", "appreciate it"] },
-  { type: "goodbye", patterns: ["goodbye", "bye", "see you", "talk later"] },
-  { type: "greeting", patterns: ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"] },
-  {
-    type: "capability_question",
-    patterns: ["what can you do", "what do you do", "help me with", "are you able to", "can you help"],
-  },
-  { type: "repeat_request", patterns: ["repeat that", "say that again", "again please", "can you repeat"] },
-  { type: "clarify_request", patterns: ["huh", "sorry?", "pardon?", "can you clarify"] },
-  { type: "frustration_or_correction", patterns: ["no, ", "that's wrong", "you are wrong", "not what i meant", "i said", "that's not"] },
-];
-
-const SUPPORT_PATTERNS = [
-  {
-    intent: "check_transfer_status",
-    patterns: [
-      "transfer status",
-      "check status",
-      "track my transfer",
-      "how do i check",
-      "where is my transfer",
-      "where is my money",
-      "tracker",
-    ],
-  },
-  {
-    intent: "money_arrival_time",
-    patterns: [
-      "when will my money arrive",
-      "when does it land",
-      "due today",
-      "how long until it arrives",
-      "estimated arrival",
-      "delivery estimate",
-    ],
-  },
-  {
-    intent: "complete_but_not_arrived",
-    patterns: [
-      "transfer complete",
-      "money hasn't arrived",
-      "money has not arrived",
-      "not arrived yet",
-      "hasn't arrived",
-      "has not arrived",
-      "recipient hasn't received",
-      "recipient has not received",
-    ],
-  },
-  {
-    intent: "transfer_delayed",
-    patterns: [
-      "taking longer than the estimate",
-      "transfer delayed",
-      "still processing",
-      "pending too long",
-      "not moving",
-      "why is my transfer taking longer",
-    ],
-  },
-  {
-    intent: "proof_of_payment",
-    patterns: ["proof of payment", "proof of transfer", "payment proof", "bank statement"],
-  },
-  {
-    intent: "banking_partner_reference",
-    patterns: ["banking partner reference", "partner reference", "utr"],
-  },
-];
-
-const UNSUPPORTED_PATTERNS = [
-  "cancel",
-  "refund",
-  "fee",
-  "fees",
-  "charge",
-  "card",
-  "account",
-  "login",
-  "password",
-  "verification",
-  "verify",
-  "recipient edit",
-  "change recipient",
-  "app issue",
-  "stocks",
-  "investing",
-  "interest",
-  "loan",
-  "loan payment",
-  "cash advance",
-  "crypto",
-  "kyc",
-];
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -213,126 +133,86 @@ function normalizeText(value) {
     .trim();
 }
 
-function matchesPattern(text, pattern) {
-  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const source = pattern.length <= 3 ? `\\b${escaped}\\b` : escaped;
-  return new RegExp(source, "i").test(text);
-}
+function buildArticleContext(contentBlocks) {
+  const lines = [];
 
-function matchesAnyPattern(text, patterns) {
-  return patterns.some((pattern) => matchesPattern(text, pattern));
-}
+  for (const block of contentBlocks) {
+    if (block.type === "heading" && block.text) {
+      lines.push(`Heading: ${block.text}`);
+      continue;
+    }
 
-function classifyLocally(question) {
-  const text = normalizeText(question);
+    if (block.type === "paragraph" && block.text) {
+      lines.push(block.text);
+      continue;
+    }
 
-  if (!text) {
-    return null;
-  }
+    if ((block.type === "unordered_list" || block.type === "ordered_list") && Array.isArray(block.items)) {
+      for (const item of block.items) {
+        lines.push(`- ${item}`);
+      }
+      continue;
+    }
 
-  if (text.length <= 3) {
-    return {
-      category: "conversational",
-      conversationalType: "clarify_request",
-      rationale: "The request was too short to classify confidently.",
-    };
-  }
-
-  for (const item of CONVERSATIONAL_PATTERNS) {
-    if (matchesAnyPattern(text, item.patterns)) {
-      return {
-        category: "conversational",
-        conversationalType: item.type,
-        rationale: `Matched local conversational pattern: ${item.type}.`,
-      };
+    if (block.type === "table" && Array.isArray(block.headers) && Array.isArray(block.rows)) {
+      lines.push(`Table: ${block.headers.join(" | ")}`);
+      for (const row of block.rows) {
+        lines.push(`- ${row.join(" | ")}`);
+      }
     }
   }
 
-  for (const item of SUPPORT_PATTERNS) {
-    if (matchesAnyPattern(text, item.patterns)) {
-      return {
-        category: "supported_faq",
-        intent: item.intent,
-        rationale: `Matched local support pattern: ${item.intent}.`,
-      };
-    }
-  }
+  return lines.join("\n").trim();
+}
 
-  if (matchesAnyPattern(text, UNSUPPORTED_PATTERNS) && matchesAnyPattern(text, ["wise", "transfer", "money"])) {
-    return {
-      category: "wise_unsupported",
-      rationale: "Matched local Wise support exclusion pattern.",
-    };
-  }
+function deriveArticles() {
+  return FAQ_SOURCE.articles.map((article) => {
+    const title = String(article.title || "").trim();
+    const intent = TITLE_TO_INTENT.get(normalizeText(title)) || null;
 
-  if (matchesAnyPattern(text, ["wise", "transfer", "money", "recipient", "sender", "bank"])) {
     return {
-      category: "unclear",
-      rationale: "Mentions Wise transfer context but did not match a supported intent.",
+      intent,
+      title,
+      url: article.url,
+      contentBlocks: article.contentBlocks,
+      sourceContext: buildArticleContext(article.contentBlocks),
     };
-  }
+  });
+}
+
+const SUPPORTED_ARTICLES = deriveArticles().filter((article) => article.intent);
+
+function getScopeSection() {
+  const section = FAQ_SOURCE.topicPage.sections.find(
+    (entry) => normalizeText(entry.title) === "where is my money?"
+  );
 
   return {
-    category: "off_topic",
-    rationale: "No Wise transfer context detected.",
+    title: String(section?.title || "Where is my money?"),
+    items:
+      section?.items?.map((item) => ({
+        title: String(item.title || "").trim(),
+        url: String(item.url || ""),
+      })) || [],
   };
 }
 
-async function classifyWithModel(question) {
-  const openai = getOpenAIClient();
-
-  const response = await openai.responses.create({
-    model: DEFAULT_RESOLVER_MODEL,
-    input: [
-      {
-        role: "system",
-        content: [
-          {
-            type: "input_text",
-            text:
-              "You classify user speech for a Wise transfer-tracking browser demo. " +
-              "Return only strict JSON with keys category, intent, conversationalType, and rationale. " +
-              "category must be one of conversational, supported_faq, wise_unsupported, off_topic, or unclear. " +
-              "If category is conversational, conversationalType must be one of greeting, thanks, goodbye, capability_question, repeat_request, clarify_request, or frustration_or_correction. " +
-              "If category is supported_faq, intent must be one of check_transfer_status, money_arrival_time, complete_but_not_arrived, transfer_delayed, proof_of_payment, or banking_partner_reference. " +
-              "If category is not supported_faq, intent must be null.",
-          },
-        ],
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text:
-              "Supported Wise transfer topics:\n" +
-              Object.entries(QUESTIONS)
-                .map(([intent, item]) => `- ${intent}: ${item.title}`)
-                .join("\n") +
-              `\n\nUser speech: ${question}`,
-          },
-        ],
-      },
-    ],
-    max_output_tokens: 140,
-  });
-
-  try {
-    return JSON.parse(response.output_text);
-  } catch {
-    return null;
-  }
+function getSupportedIntentCatalog() {
+  return SUPPORTED_ARTICLES.map((article) => ({
+    intent: article.intent,
+    title: article.title,
+  }));
 }
 
-function normalizeModelRoute(rawRoute) {
+function normalizeRoute(rawRoute) {
   if (!rawRoute || typeof rawRoute !== "object") {
     return null;
   }
 
   const category = typeof rawRoute.category === "string" ? rawRoute.category : null;
-  const intent = typeof rawRoute.intent === "string" ? rawRoute.intent : null;
+  const intent = typeof rawRoute.intent === "string" ? rawRoute.intent : "none";
   const conversationalType =
-    typeof rawRoute.conversationalType === "string" ? rawRoute.conversationalType : null;
+    typeof rawRoute.conversationalType === "string" ? rawRoute.conversationalType : "none";
   const rationale = typeof rawRoute.rationale === "string" ? rawRoute.rationale : "No rationale provided.";
 
   if (!category) {
@@ -342,7 +222,102 @@ function normalizeModelRoute(rawRoute) {
   return { category, intent, conversationalType, rationale };
 }
 
-function buildFinalResult(route) {
+function buildRoutePrompt(userQuestion) {
+  const scopeSection = getScopeSection();
+  const supportedIntentCatalog = getSupportedIntentCatalog();
+
+  return [
+    "You are an intent router for a Wise transfer-tracking browser demo.",
+    "Classify the user's utterance by intent, not by keywords.",
+    "Use supported_faq only when the user is asking about one of the approved Wise 'Where is my money?' topics.",
+    "Use wise_unsupported for Wise-related support requests outside the approved topics, such as refunds, cancellations, fees, recipient edits, app/account issues, verification, cards, loans, investing, or other Wise help topics.",
+    "Use off_topic for unrelated subjects or general knowledge.",
+    "Use conversational for greetings, thanks, goodbye, repeat requests, capability questions, clarifications, or direct corrections.",
+    "Return only the schema fields.",
+    "",
+    `Scope section: ${scopeSection.title}`,
+    "Approved topics:",
+    ...supportedIntentCatalog.map((item) => `- ${item.intent}: ${item.title}`),
+    "",
+    "Examples:",
+    'User: "Hi there" -> category conversational, conversationalType greeting.',
+    'User: "What can you help with?" -> category conversational, conversationalType capability_question.',
+    'User: "When will my money arrive?" -> category supported_faq, intent money_arrival_time.',
+    'User: "I want to cancel my transfer" -> category wise_unsupported.',
+    'User: "Can you teach me cooking?" -> category off_topic.',
+    "",
+    `User utterance: ${userQuestion}`,
+  ].join("\n");
+}
+
+async function classifyRoute(userQuestion) {
+  const openai = getOpenAIClient();
+
+  const response = await openai.responses.create({
+    model: DEFAULT_ROUTER_MODEL,
+    input: [
+      {
+        role: "system",
+        content: [
+          {
+            type: "input_text",
+            text: buildRoutePrompt(userQuestion),
+          },
+        ],
+      },
+    ],
+    text: {
+      format: ROUTE_SCHEMA,
+    },
+    max_output_tokens: 180,
+  });
+
+  try {
+    return normalizeRoute(JSON.parse(response.output_text));
+  } catch {
+    return null;
+  }
+}
+
+async function answerFromSource({ userQuestion, article }) {
+  const openai = getOpenAIClient();
+
+  const response = await openai.responses.create({
+    model: DEFAULT_ANSWER_MODEL,
+    input: [
+      {
+        role: "system",
+        content: [
+          {
+            type: "input_text",
+            text:
+              "You are a Wise transfer-tracking assistant. Answer only from the provided source article text. " +
+              "Do not use outside knowledge. If the source does not support the answer, say you are not sure and ask the user to rephrase their Wise transfer question. " +
+              "Keep the response concise and spoken-friendly.",
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text:
+              `User question: ${userQuestion}\n\n` +
+              `Source article title: ${article.title}\n` +
+              `Source article URL: ${article.url}\n\n` +
+              `Source article text:\n${article.sourceContext}`,
+          },
+        ],
+      },
+    ],
+    max_output_tokens: 220,
+  });
+
+  return String(response.output_text || "").trim();
+}
+
+function buildResolutionResultBase(route) {
   if (!route) {
     return {
       category: "unclear",
@@ -357,29 +332,16 @@ function buildFinalResult(route) {
   }
 
   if (route.category === "conversational") {
-    const type = route.conversationalType || "clarify_request";
+    const conversationalType = route.conversationalType === "none" ? "clarify_request" : route.conversationalType;
+
     return {
       category: "conversational",
       intent: null,
-      conversationalType: type,
-      responseText: CONVERSATIONAL_REPLIES[type] || CONVERSATIONAL_REPLIES.clarify_request,
+      conversationalType,
+      responseText: CONVERSATIONAL_REPLIES[conversationalType] || CONVERSATIONAL_REPLIES.clarify_request,
       sourceTitle: null,
       sourceUrl: null,
-      shouldEndCall: type === "goodbye",
-      rationale: route.rationale,
-    };
-  }
-
-  if (route.category === "supported_faq" && route.intent && QUESTIONS[route.intent]) {
-    const item = QUESTIONS[route.intent];
-    return {
-      category: "supported_faq",
-      intent: route.intent,
-      conversationalType: null,
-      responseText: item.answer,
-      sourceTitle: item.title,
-      sourceUrl: item.url,
-      shouldEndCall: false,
+      shouldEndCall: conversationalType === "goodbye",
       rationale: route.rationale,
     };
   }
@@ -410,16 +372,7 @@ function buildFinalResult(route) {
     };
   }
 
-  return {
-    category: "unclear",
-    intent: null,
-    conversationalType: null,
-    responseText: "Could you tell me your Wise transfer tracking question?",
-    sourceTitle: null,
-    sourceUrl: null,
-    shouldEndCall: false,
-    rationale: route.rationale,
-  };
+  return null;
 }
 
 export function buildSessionConfig() {
@@ -475,16 +428,56 @@ export async function createRealtimeClientSecret() {
 }
 
 export async function resolveTranscript(userQuestion) {
-  const localRoute = classifyLocally(userQuestion);
-  const route =
-    localRoute?.category === "supported_faq" ||
-    localRoute?.category === "conversational" ||
-    localRoute?.category === "wise_unsupported" ||
-    localRoute?.category === "off_topic"
-      ? localRoute
-      : normalizeModelRoute(await classifyWithModel(userQuestion)) || localRoute;
+  const route = await classifyRoute(userQuestion);
+  const baseResult = buildResolutionResultBase(route);
 
-  return buildFinalResult(route);
+  if (baseResult) {
+    return baseResult;
+  }
+
+  if (route?.category === "supported_faq" && route.intent && route.intent !== "none") {
+    const article = SUPPORTED_ARTICLES.find((item) => item.intent === route.intent);
+
+    if (!article) {
+      return {
+        category: "unclear",
+        intent: null,
+        conversationalType: null,
+        responseText: "Could you tell me your Wise transfer tracking question?",
+        sourceTitle: null,
+        sourceUrl: null,
+        shouldEndCall: false,
+        rationale: "No matching article was found for the classified intent.",
+      };
+    }
+
+    const responseText = await answerFromSource({
+      userQuestion,
+      article,
+    });
+
+    return {
+      category: "supported_faq",
+      intent: article.intent,
+      conversationalType: null,
+      responseText: responseText || "Could you tell me your Wise transfer tracking question?",
+      sourceTitle: article.title,
+      sourceUrl: article.url,
+      shouldEndCall: false,
+      rationale: route.rationale,
+    };
+  }
+
+  return {
+    category: "unclear",
+    intent: null,
+    conversationalType: null,
+    responseText: "Could you tell me your Wise transfer tracking question?",
+    sourceTitle: null,
+    sourceUrl: null,
+    shouldEndCall: false,
+    rationale: route?.rationale || "The request could not be classified.",
+  };
 }
 
 function jsonResponse(status, payload) {
