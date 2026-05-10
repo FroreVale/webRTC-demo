@@ -1,4 +1,4 @@
-import { handleRealtimeApiRequest } from "../../../server/realtime-api.js";
+import { handleRealtimeApiRequest } from "../../server/realtime-api.js";
 
 export default async function handler(request, response) {
   const body = await new Promise((resolve, reject) => {
