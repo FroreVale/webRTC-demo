@@ -18,6 +18,8 @@ type ResolveResult = {
       articleTitle: string;
       sectionTitle: string;
       score: number;
+      cosine: number;
+      lexical: number;
     }>;
   };
 };
@@ -217,7 +219,7 @@ function App() {
       appendLog(`Top match score: ${matchPercent}%`);
       for (const [index, item] of result.debug.topChunks.slice(0, 3).entries()) {
         appendLog(
-          `Match ${index + 1}: ${item.score.toFixed(3)} | ${item.articleTitle} | ${item.sectionTitle}`
+          `Match ${index + 1}: ${item.score.toFixed(3)} total | ${item.cosine.toFixed(3)} semantic | ${item.lexical.toFixed(3)} lexical | ${item.articleTitle} | ${item.sectionTitle}`
         );
       }
     }

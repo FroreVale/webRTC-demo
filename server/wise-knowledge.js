@@ -4,6 +4,7 @@ import OpenAI from "openai";
 
 const FAQ_PATH = path.resolve(process.cwd(), "data", "wiseFaq.json");
 const CACHE_PATH = path.resolve(process.cwd(), "data", "wiseFaq.index.json");
+const INDEX_VERSION = 3;
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDINGS_MODEL || "text-embedding-3-small";
 const ANSWER_MODEL = process.env.OPENAI_ANSWER_MODEL || process.env.OPENAI_RESOLVER_MODEL || "gpt-5.4-mini";
@@ -48,6 +49,60 @@ const WISE_CUES = [
   "transfer confirmation",
 ];
 
+const STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "be",
+  "can",
+  "do",
+  "for",
+  "from",
+  "get",
+  "how",
+  "i",
+  "if",
+  "in",
+  "is",
+  "it",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "our",
+  "s",
+  "the",
+  "their",
+  "them",
+  "there",
+  "this",
+  "to",
+  "we",
+  "what",
+  "when",
+  "where",
+  "will",
+  "with",
+  "you",
+  "your",
+  "one",
+  "tell",
+  "help",
+]);
+
+const PHRASE_ALIASES = [
+  [/\bpdf receipt\b/g, "receipt"],
+  [/\btransfer receipt\b/g, "receipt"],
+  [/\bunique transaction reference\b/g, "transaction reference"],
+  [/\butr\b/g, "transaction reference"],
+  [/\bbanking partner reference number\b/g, "transaction reference number"],
+  [/\bbanking partner reference\b/g, "reference"],
+  [/\bmoney has arrived\b/g, "transfer complete"],
+  [/\bhas arrived\b/g, "transfer complete"],
+];
+
 let knowledgeBasePromise = null;
 
 function getOpenAIClient() {
@@ -73,39 +128,31 @@ function normalizeText(value) {
     .trim();
 }
 
-function formatBlock(block) {
-  if (block.type === "paragraph" && block.text) {
-    return String(block.text).trim();
+function normalizeForRetrieval(value) {
+  let text = normalizeText(value);
+
+  for (const [pattern, replacement] of PHRASE_ALIASES) {
+    text = text.replace(pattern, replacement);
   }
 
-  if ((block.type === "unordered_list" || block.type === "ordered_list") && Array.isArray(block.items)) {
-    return block.items.map((item) => `- ${item}`).join("\n");
-  }
+  return text;
+}
 
-  if (block.type === "table" && Array.isArray(block.headers) && Array.isArray(block.rows)) {
-    const rows = [`Table: ${block.headers.join(" | ")}`];
-    for (const row of block.rows) {
-      rows.push(`- ${row.join(" | ")}`);
-    }
-    return rows.join("\n");
-  }
-
-  if (block.type === "heading" && block.text) {
-    return `Heading: ${String(block.text).trim()}`;
-  }
-
-  return "";
+function tokenizeForRetrieval(value) {
+  return normalizeForRetrieval(value)
+    .split(/[^a-z0-9]+/g)
+    .map((token) => token.trim())
+    .filter((token) => token && !STOPWORDS.has(token));
 }
 
 function buildChunksForArticle(article) {
   const chunks = [];
   let currentHeading = "Introduction";
-  let currentParts = [];
   let chunkIndex = 0;
 
-  function flush() {
-    const text = currentParts.join("\n").trim();
-    if (!text) {
+  function pushChunk(text) {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) {
       return;
     }
 
@@ -113,7 +160,7 @@ function buildChunksForArticle(article) {
     const retrievalText = [
       `Article: ${article.title}`,
       `Section: ${sectionTitle}`,
-      text,
+      trimmed,
     ].join("\n").trim();
 
     chunks.push({
@@ -121,29 +168,36 @@ function buildChunksForArticle(article) {
       articleTitle: article.title,
       articleUrl: article.url,
       sectionTitle,
-      text,
+      text: trimmed,
       retrievalText,
     });
-    currentParts = [];
   }
 
   for (const block of article.contentBlocks) {
     if (block.type === "heading" && block.text) {
-      flush();
       currentHeading = String(block.text).trim();
-      currentParts = [];
       continue;
     }
 
-    const formatted = formatBlock(block);
-    if (!formatted) {
+    if (block.type === "paragraph" && block.text) {
+      pushChunk(block.text);
       continue;
     }
 
-    currentParts.push(formatted);
+    if ((block.type === "unordered_list" || block.type === "ordered_list") && Array.isArray(block.items)) {
+      for (const item of block.items) {
+        pushChunk(item);
+      }
+      continue;
+    }
+
+    if (block.type === "table" && Array.isArray(block.headers) && Array.isArray(block.rows)) {
+      pushChunk(`Table: ${block.headers.join(" | ")}`);
+      for (const row of block.rows) {
+        pushChunk(row.join(" | "));
+      }
+    }
   }
-
-  flush();
 
   return chunks;
 }
@@ -193,6 +247,26 @@ function cosineSimilarity(a, b) {
   }
 
   return dot / (Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB));
+}
+
+function lexicalSimilarity(queryText, chunkText) {
+  const queryTokens = tokenizeForRetrieval(queryText);
+  const chunkTokens = tokenizeForRetrieval(chunkText);
+
+  if (!queryTokens.length || !chunkTokens.length) {
+    return 0;
+  }
+
+  const chunkTokenSet = new Set(chunkTokens);
+  let matched = 0;
+
+  for (const token of queryTokens) {
+    if (chunkTokenSet.has(token)) {
+      matched += 1;
+    }
+  }
+
+  return matched / queryTokens.length;
 }
 
 function hasWiseSignals(userQuestion) {
@@ -272,7 +346,12 @@ async function loadKnowledgeBaseFromCache() {
   try {
     const cached = JSON.parse(fs.readFileSync(CACHE_PATH, "utf8"));
 
-    if (!cached || cached.embeddingModel !== EMBEDDING_MODEL || !Array.isArray(cached.chunks)) {
+    if (
+      !cached ||
+      cached.embeddingModel !== EMBEDDING_MODEL ||
+      cached.indexVersion !== INDEX_VERSION ||
+      !Array.isArray(cached.chunks)
+    ) {
       return null;
     }
 
@@ -302,6 +381,7 @@ async function buildKnowledgeBase() {
   }));
 
   const knowledgeBase = {
+    indexVersion: INDEX_VERSION,
     embeddingModel: EMBEDDING_MODEL,
     articles,
     chunks: indexedChunks,
@@ -333,8 +413,13 @@ async function searchKnowledgeBase(userQuestion) {
   const queryEmbedding = queryResponse.data[0].embedding;
   const scored = knowledgeBase.chunks.map((chunk) => ({
     chunk,
-    score: cosineSimilarity(queryEmbedding, chunk.embedding),
+    cosineScore: cosineSimilarity(queryEmbedding, chunk.embedding),
+    lexicalScore: lexicalSimilarity(userQuestion, chunk.text),
   }));
+
+  for (const item of scored) {
+    item.score = (item.cosineScore * 0.78) + (item.lexicalScore * 0.22);
+  }
 
   scored.sort((left, right) => right.score - left.score);
 
@@ -358,6 +443,8 @@ function buildDebugInfo(userQuestion, searchResult) {
     articleTitle: item.chunk.articleTitle,
     sectionTitle: item.chunk.sectionTitle,
     score: Number(item.score.toFixed(4)),
+    cosine: Number(item.cosineScore.toFixed(4)),
+    lexical: Number(item.lexicalScore.toFixed(4)),
   }));
 
   return {
