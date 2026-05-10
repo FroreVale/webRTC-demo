@@ -40,6 +40,12 @@ const WISE_CUES = [
   "fees",
   "verification",
   "account",
+  "utr",
+  "unique transaction reference",
+  "transaction reference",
+  "banking partner reference",
+  "transfer receipt",
+  "transfer confirmation",
 ];
 
 let knowledgeBasePromise = null;
@@ -168,14 +174,25 @@ function deriveKnowledgeChunks() {
   return { articles, chunks };
 }
 
-function dotProduct(a, b) {
-  let total = 0;
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let magnitudeA = 0;
+  let magnitudeB = 0;
 
   for (let index = 0; index < a.length; index += 1) {
-    total += a[index] * b[index];
+    const left = a[index];
+    const right = b[index];
+
+    dot += left * right;
+    magnitudeA += left * left;
+    magnitudeB += right * right;
   }
 
-  return total;
+  if (!magnitudeA || !magnitudeB) {
+    return 0;
+  }
+
+  return dot / (Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB));
 }
 
 function hasWiseSignals(userQuestion) {
@@ -316,7 +333,7 @@ async function searchKnowledgeBase(userQuestion) {
   const queryEmbedding = queryResponse.data[0].embedding;
   const scored = knowledgeBase.chunks.map((chunk) => ({
     chunk,
-    score: dotProduct(queryEmbedding, chunk.embedding),
+    score: cosineSimilarity(queryEmbedding, chunk.embedding),
   }));
 
   scored.sort((left, right) => right.score - left.score);
@@ -333,6 +350,19 @@ async function searchKnowledgeBase(userQuestion) {
   return {
     scoredChunks: scored,
     articleMatches: Array.from(bestByArticle.values()).sort((left, right) => right.score - left.score),
+  };
+}
+
+function buildDebugInfo(userQuestion, searchResult) {
+  const topChunks = searchResult.scoredChunks.slice(0, 5).map((item) => ({
+    articleTitle: item.chunk.articleTitle,
+    sectionTitle: item.chunk.sectionTitle,
+    score: Number(item.score.toFixed(4)),
+  }));
+
+  return {
+    userQuestion,
+    topChunks,
   };
 }
 
@@ -387,16 +417,25 @@ async function answerFromChunks({ userQuestion, articleTitle, articleUrl, chunks
 export async function resolveTranscript(userQuestion) {
   const conversationalType = detectConversationalType(userQuestion);
   if (conversationalType !== "none") {
-    return conversationResult(conversationalType, "The utterance was classified as conversational.");
+    return {
+      ...conversationResult(conversationalType, "The utterance was classified as conversational."),
+      debug: {
+        route: "conversational",
+        topScore: 0,
+        topChunks: [],
+      },
+    };
   }
 
-  const { articleMatches, scoredChunks } = await searchKnowledgeBase(userQuestion);
+  const searchResult = await searchKnowledgeBase(userQuestion);
+  const { articleMatches, scoredChunks } = searchResult;
   const bestArticle = articleMatches[0] || null;
   const topScore = bestArticle?.score ?? 0;
   const isWiseRelated = hasWiseSignals(userQuestion);
 
   const strongMatchThreshold = 0.78;
-  const weakMatchThreshold = 0.62;
+  const weakMatchThreshold = 0.58;
+  const debugInfo = buildDebugInfo(userQuestion, searchResult);
 
   if (!bestArticle || topScore < weakMatchThreshold) {
     return {
@@ -410,6 +449,11 @@ export async function resolveTranscript(userQuestion) {
       sourceUrl: null,
       shouldEndCall: false,
       rationale: `No strong semantic match was found. Top score: ${topScore.toFixed(3)}.`,
+      debug: {
+        route: isWiseRelated ? "wise_unsupported" : "off_topic",
+        topScore,
+        topChunks: debugInfo.topChunks,
+      },
     };
   }
 
@@ -423,6 +467,11 @@ export async function resolveTranscript(userQuestion) {
       sourceUrl: null,
       shouldEndCall: false,
       rationale: `The question did not look like a Wise transfer issue. Top score: ${topScore.toFixed(3)}.`,
+      debug: {
+        route: "off_topic",
+        topScore,
+        topChunks: debugInfo.topChunks,
+      },
     };
   }
 
@@ -449,5 +498,10 @@ export async function resolveTranscript(userQuestion) {
     sourceUrl: article.articleUrl,
     shouldEndCall: false,
     rationale: `Top semantic match: ${article.articleTitle} (${topScore.toFixed(3)}).`,
+    debug: {
+      route: "supported_faq",
+      topScore,
+      topChunks: debugInfo.topChunks,
+    },
   };
 }

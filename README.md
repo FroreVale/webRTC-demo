@@ -24,7 +24,7 @@ Create `.env` in the project root:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key
-OPENAI_REALTIME_MODEL=gpt-realtime-2
+OPENAI_REALTIME_MODEL=gpt-realtime-mini
 OPENAI_RESOLVER_MODEL=gpt-5.4-mini
 ```
 

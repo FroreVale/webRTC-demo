@@ -38,7 +38,7 @@ function loadLocalEnvFile(filePath) {
 loadLocalEnvFile(path.resolve(process.cwd(), ".env"));
 loadLocalEnvFile(path.resolve(process.cwd(), ".env.local"));
 
-const DEFAULT_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2";
+const DEFAULT_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-mini";
 
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -59,9 +59,6 @@ export function buildSessionConfig() {
       "Only respond when explicitly asked to speak. " +
       "Keep replies short and spoken-friendly. " +
       "Do not answer questions outside Wise transfer tracking.",
-    reasoning: {
-      effort: "low",
-    },
     output_modalities: ["audio"],
     audio: {
       input: {

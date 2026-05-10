@@ -11,6 +11,15 @@ type ResolveResult = {
   sourceUrl: string | null;
   shouldEndCall: boolean;
   rationale: string;
+  debug?: {
+    route: string;
+    topScore: number;
+    topChunks: Array<{
+      articleTitle: string;
+      sectionTitle: string;
+      score: number;
+    }>;
+  };
 };
 
 type ResolvePayload = {
@@ -201,6 +210,17 @@ function App() {
     setAssistantText(result.responseText);
     setSourceTitle(result.sourceTitle);
     setSourceUrl(result.sourceUrl);
+
+    if (result.debug) {
+      const matchPercent = Math.round(((result.debug.topScore || 0) + 1) * 50);
+      appendLog(`Retriever route: ${result.debug.route}.`);
+      appendLog(`Top match score: ${matchPercent}%`);
+      for (const [index, item] of result.debug.topChunks.slice(0, 3).entries()) {
+        appendLog(
+          `Match ${index + 1}: ${item.score.toFixed(3)} | ${item.articleTitle} | ${item.sectionTitle}`
+        );
+      }
+    }
 
     requestSpeech(result.responseText, {
       route_category: result.category,
