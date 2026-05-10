@@ -292,7 +292,17 @@ function App() {
     }
 
     if (message.type === "error") {
-      appendLog(`Realtime error: ${JSON.stringify(message.error ?? message)}`);
+      const error = message.error;
+      const errorCode =
+        error && typeof error === "object" && "code" in error && typeof error.code === "string"
+          ? error.code
+          : null;
+
+      if (errorCode === "response_cancel_not_active") {
+        return;
+      }
+
+      appendLog(`Realtime error: ${JSON.stringify(error ?? message)}`);
     }
   }
 

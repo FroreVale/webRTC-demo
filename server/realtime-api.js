@@ -1,4 +1,44 @@
+import fs from "node:fs";
+import path from "node:path";
 import OpenAI from "openai";
+
+function loadLocalEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+
+  const contents = fs.readFileSync(filePath, "utf8");
+
+  for (const line of contents.split(/\r?\n/)) {
+    const trimmed = line.trim();
+
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, equalsIndex).trim();
+    let value = trimmed.slice(equalsIndex + 1).trim();
+
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (!process.env[key]) {
+      process.env[key] = value;
+    }
+  }
+}
+
+loadLocalEnvFile(path.resolve(process.cwd(), ".env"));
+loadLocalEnvFile(path.resolve(process.cwd(), ".env.local"));
 
 const DEFAULT_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2";
 const DEFAULT_RESOLVER_MODEL = process.env.OPENAI_RESOLVER_MODEL || "gpt-5.4-mini";
@@ -173,8 +213,14 @@ function normalizeText(value) {
     .trim();
 }
 
-function includesAny(text, patterns) {
-  return patterns.some((pattern) => text.includes(pattern));
+function matchesPattern(text, pattern) {
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const source = pattern.length <= 3 ? `\\b${escaped}\\b` : escaped;
+  return new RegExp(source, "i").test(text);
+}
+
+function matchesAnyPattern(text, patterns) {
+  return patterns.some((pattern) => matchesPattern(text, pattern));
 }
 
 function classifyLocally(question) {
@@ -193,7 +239,7 @@ function classifyLocally(question) {
   }
 
   for (const item of CONVERSATIONAL_PATTERNS) {
-    if (includesAny(text, item.patterns)) {
+    if (matchesAnyPattern(text, item.patterns)) {
       return {
         category: "conversational",
         conversationalType: item.type,
@@ -203,7 +249,7 @@ function classifyLocally(question) {
   }
 
   for (const item of SUPPORT_PATTERNS) {
-    if (includesAny(text, item.patterns)) {
+    if (matchesAnyPattern(text, item.patterns)) {
       return {
         category: "supported_faq",
         intent: item.intent,
@@ -212,14 +258,14 @@ function classifyLocally(question) {
     }
   }
 
-  if (includesAny(text, UNSUPPORTED_PATTERNS) && includesAny(text, ["wise", "transfer", "money"])) {
+  if (matchesAnyPattern(text, UNSUPPORTED_PATTERNS) && matchesAnyPattern(text, ["wise", "transfer", "money"])) {
     return {
       category: "wise_unsupported",
       rationale: "Matched local Wise support exclusion pattern.",
     };
   }
 
-  if (includesAny(text, ["wise", "transfer", "money", "recipient", "sender", "bank"])) {
+  if (matchesAnyPattern(text, ["wise", "transfer", "money", "recipient", "sender", "bank"])) {
     return {
       category: "unclear",
       rationale: "Mentions Wise transfer context but did not match a supported intent.",
