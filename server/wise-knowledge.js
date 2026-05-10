@@ -7,6 +7,8 @@ const CACHE_PATH = path.resolve(process.cwd(), "data", "wiseFaq.index.json");
 const INDEX_VERSION = 3;
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDINGS_MODEL || "text-embedding-3-small";
+const ROUTER_MODEL =
+  process.env.OPENAI_ROUTER_MODEL || process.env.OPENAI_ANSWER_MODEL || process.env.OPENAI_RESOLVER_MODEL || "gpt-5.4-mini";
 const ANSWER_MODEL = process.env.OPENAI_ANSWER_MODEL || process.env.OPENAI_RESOLVER_MODEL || "gpt-5.4-mini";
 
 const FAQ_SOURCE = JSON.parse(fs.readFileSync(FAQ_PATH, "utf8"));
@@ -19,40 +21,6 @@ const TITLE_TO_INTENT = new Map([
   ["what is a proof of payment?", "proof_of_payment"],
   ["what's a banking partner reference number?", "banking_partner_reference"],
 ]);
-
-const WISE_CUES = [
-  "wise",
-  "transfer",
-  "money",
-  "recipient",
-  "bank",
-  "payment",
-  "receipt",
-  "pdf",
-  "download",
-  "track",
-  "tracker",
-  "payment proof",
-  "proof of payment",
-  "banking partner",
-  "reference number",
-  "status",
-  "arrive",
-  "complete",
-  "estimate",
-  "cancel",
-  "refund",
-  "fee",
-  "fees",
-  "verification",
-  "account",
-  "utr",
-  "unique transaction reference",
-  "transaction reference",
-  "banking partner reference",
-  "transfer receipt",
-  "transfer confirmation",
-];
 
 const STOPWORDS = new Set([
   "a",
@@ -163,14 +131,10 @@ function buildChunksForArticle(article) {
     }
 
     const sectionTitle = currentHeading || "Introduction";
-    const retrievalText = [
-      `Article: ${article.title}`,
-      `Section: ${sectionTitle}`,
-      trimmed,
-    ].join("\n").trim();
+    const retrievalText = [`Article: ${article.title}`, `Section: ${sectionTitle}`, trimmed].join("\n").trim();
 
     chunks.push({
-      chunkId: `${normalizeText(article.title).replace(/[^a-z0-9]+/g, "-")}-${chunkIndex += 1}`,
+      chunkId: `${normalizeText(article.title).replace(/[^a-z0-9]+/g, "-")}-${(chunkIndex += 1)}`,
       articleTitle: article.title,
       articleUrl: article.url,
       sectionTitle,
@@ -275,62 +239,92 @@ function lexicalSimilarity(queryText, chunkText) {
   return matched / queryTokens.length;
 }
 
-function hasWiseSignals(userQuestion) {
-  const normalized = normalizeText(userQuestion);
-
-  return WISE_CUES.some((cue) => normalized.includes(cue));
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
-function detectConversationalType(userQuestion) {
-  const normalized = normalizeText(userQuestion);
+function normalizeClassificationPayload(payload) {
+  const kind = ["conversational", "faq", "wise_related_nonfaq", "off_topic", "unclear"].includes(payload?.kind)
+    ? payload.kind
+    : "unclear";
 
-  if (!normalized) {
-    return "clarify_request";
-  }
+  const subtype = [
+    "greeting",
+    "thanks",
+    "goodbye",
+    "capability_question",
+    "clarification_request",
+    "contextual_followup",
+  ].includes(payload?.subtype)
+    ? payload.subtype
+    : null;
 
-  if (/^(hi|hello|hey|hiya|yo)\b/.test(normalized) || /\b(how are you|good morning|good afternoon|good evening)\b/.test(normalized)) {
-    return "greeting";
-  }
+  const rewrittenQuestion =
+    typeof payload?.rewrittenQuestion === "string" && payload.rewrittenQuestion.trim()
+      ? payload.rewrittenQuestion.trim()
+      : null;
 
-  if (/\b(thanks|thank you|appreciate it)\b/.test(normalized)) {
-    return "thanks";
-  }
+  const reason = typeof payload?.reason === "string" && payload.reason.trim() ? payload.reason.trim() : "Router classification.";
 
-  if (/\b(bye|goodbye|see you|later)\b/.test(normalized)) {
-    return "goodbye";
-  }
-
-  if (/\b(what can you help with|who are you|what do you do|what are you)\b/.test(normalized)) {
-    return "capability_question";
-  }
-
-  if (/\b(can you repeat|say that again|repeat that|again please)\b/.test(normalized)) {
-    return "repeat_request";
-  }
-
-  if (/\b(what do you mean|can you clarify|i do not understand|i don't understand)\b/.test(normalized)) {
-    return "clarify_request";
-  }
-
-  if (/\b(no that's wrong|not what i said|i meant|you misunderstood|that's not right)\b/.test(normalized)) {
-    return "frustration_or_correction";
-  }
-
-  return "none";
+  return {
+    kind,
+    subtype,
+    wiseRelated: Boolean(payload?.wiseRelated),
+    rewrittenQuestion,
+    reason,
+  };
 }
 
-function isContextualFollowUp(userQuestion) {
-  const normalized = normalizeText(userQuestion);
+function buildClassificationPrompt(userQuestion, context) {
+  return [
+    "You are a router for a Wise transfer-tracking voice assistant.",
+    "Classify the current user turn using the previous conversation context when helpful.",
+    "Output JSON only with these keys:",
+    'kind: one of "conversational", "faq", "wise_related_nonfaq", "off_topic", "unclear".',
+    'subtype: one of "greeting", "thanks", "goodbye", "capability_question", "clarification_request", "contextual_followup", or null.',
+    "wiseRelated: true if the user is talking about Wise or a Wise transfer-related topic, even if it is not answerable from the FAQ.",
+    "rewrittenQuestion: a full standalone question only when the turn is a contextual_followup or shorthand FAQ question; otherwise null.",
+    "reason: short explanation.",
+    "Rules:",
+    "- Use conversational for greetings, thanks, goodbyes, capability questions, clarification requests, and short follow-ups.",
+    "- Use contextual_followup when the user is referencing the previous turn, like 'do it', 'explain that', or 'go on'.",
+    "- Use faq when the user is asking a standalone Wise transfer-tracking question that should go to retrieval.",
+    "- Use wise_related_nonfaq for Wise-related topics that are outside the supported FAQ scope.",
+    "- Use off_topic for unrelated questions.",
+    "- Use unclear only when the turn cannot be confidently classified.",
+    "",
+    `Current user turn: ${userQuestion}`,
+    `Previous user turn: ${context?.lastUserQuestion || ""}`,
+    `Previous assistant turn: ${context?.lastAssistantText || ""}`,
+    `Previous source title: ${context?.lastSourceTitle || ""}`,
+    `Previous category: ${context?.lastCategory || ""}`,
+  ].join("\n");
+}
 
-  if (!normalized) {
-    return false;
-  }
+async function classifyTurn(userQuestion, context = {}) {
+  const openai = getOpenAIClient();
+  const response = await openai.responses.create({
+    model: ROUTER_MODEL,
+    input: [
+      {
+        role: "system",
+        content: [
+          {
+            type: "input_text",
+            text: buildClassificationPrompt(userQuestion, context),
+          },
+        ],
+      },
+    ],
+    max_output_tokens: 220,
+  });
 
-  return (
-    /^(yes|yeah|yep|sure|correct|right|exactly|okay|ok)\b/.test(normalized) ||
-    /\b(that's what i'm asking|that's what i mean|that is what i mean|that's it|yes, that's it|yes that's it)\b/.test(normalized) ||
-    /\b(continue|go on|tell me more|explain that|what about that)\b/.test(normalized)
-  );
+  const parsed = safeJsonParse(String(response.output_text || "").trim());
+  return normalizeClassificationPayload(parsed);
 }
 
 function conversationResult(conversationalType, rationale) {
@@ -439,7 +433,7 @@ async function searchKnowledgeBase(userQuestion) {
   }));
 
   for (const item of scored) {
-    item.score = (item.cosineScore * 0.72) + (item.lexicalScore * 0.18) + (item.titleScore * 0.1);
+    item.score = item.cosineScore * 0.72 + item.lexicalScore * 0.18 + item.titleScore * 0.1;
   }
 
   scored.sort((left, right) => right.score - left.score);
@@ -478,11 +472,7 @@ function buildDebugInfo(userQuestion, searchResult) {
 function buildAnswerPrompt(userQuestion, articleTitle, articleUrl, chunks) {
   const chunkSections = chunks
     .map((chunk, index) => {
-      return [
-        `Chunk ${index + 1}`,
-        `Section: ${chunk.sectionTitle}`,
-        `Text: ${chunk.text}`,
-      ].join("\n");
+      return [`Chunk ${index + 1}`, `Section: ${chunk.sectionTitle}`, `Text: ${chunk.text}`].join("\n");
     })
     .join("\n\n");
 
@@ -524,38 +514,86 @@ async function answerFromChunks({ userQuestion, articleTitle, articleUrl, chunks
 }
 
 export async function resolveTranscript(userQuestion, context = {}) {
-  const hasFollowUpContext = Boolean(context?.lastCategory === "supported_faq" && context?.lastSourceTitle);
-  if (isContextualFollowUp(userQuestion) && hasFollowUpContext) {
+  const classification = await classifyTurn(userQuestion, context);
+
+  if (classification.kind === "conversational" && classification.subtype !== "contextual_followup") {
     return {
-      category: "conversational",
+      ...conversationResult(classification.subtype || "clarify_request", classification.reason),
+      debug: {
+        route: "conversational",
+        topScore: 0,
+        topChunks: [],
+      },
+    };
+  }
+
+  if (classification.kind === "conversational" && classification.subtype === "contextual_followup" && !classification.rewrittenQuestion) {
+    return {
+      ...conversationResult("clarify_request", classification.reason),
+      debug: {
+        route: "conversational",
+        topScore: 0,
+        topChunks: [],
+      },
+    };
+  }
+
+  if (classification.kind === "off_topic") {
+    return {
+      category: "off_topic",
       intent: null,
-      conversationalType: "contextual_followup",
-      responseText: `Understood. We’re still on ${context.lastSourceTitle}. If you want, I can explain the part that matters most.`,
-      sourceTitle: context.lastSourceTitle || null,
-      sourceUrl: context.lastSourceUrl || null,
+      conversationalType: null,
+      responseText: "I only help with Wise transfer tracking questions. If you have a transfer tracking question, please ask it.",
+      sourceTitle: null,
+      sourceUrl: null,
       shouldEndCall: false,
-      rationale: "The utterance was a contextual follow-up to the previous supported FAQ.",
+      rationale: classification.reason,
       debug: {
-        route: "conversational",
+        route: "off_topic",
         topScore: 0,
         topChunks: [],
       },
     };
   }
 
-  const conversationalType = detectConversationalType(userQuestion);
-  if (conversationalType !== "none") {
+  if (classification.kind === "wise_related_nonfaq") {
     return {
-      ...conversationResult(conversationalType, "The utterance was classified as conversational."),
+      category: "wise_unsupported",
+      intent: null,
+      conversationalType: null,
+      responseText: "I can only help with Wise transfer tracking questions. For this issue, a human support agent is needed.",
+      sourceTitle: null,
+      sourceUrl: null,
+      shouldEndCall: false,
+      rationale: classification.reason,
       debug: {
-        route: "conversational",
+        route: "wise_unsupported",
         topScore: 0,
         topChunks: [],
       },
     };
   }
 
-  const searchResult = await searchKnowledgeBase(userQuestion);
+  if (classification.kind === "unclear") {
+    return {
+      category: "unclear",
+      intent: null,
+      conversationalType: null,
+      responseText: "Could you rephrase your Wise transfer question?",
+      sourceTitle: null,
+      sourceUrl: null,
+      shouldEndCall: false,
+      rationale: classification.reason,
+      debug: {
+        route: "unclear",
+        topScore: 0,
+        topChunks: [],
+      },
+    };
+  }
+
+  const searchInput = classification.rewrittenQuestion || userQuestion;
+  const searchResult = await searchKnowledgeBase(searchInput);
   const { articleMatches, scoredChunks } = searchResult;
   const bestArticle = articleMatches[0] || null;
   const bestChunk = scoredChunks[0] || null;
@@ -563,10 +601,7 @@ export async function resolveTranscript(userQuestion, context = {}) {
   const topChunkScore = bestChunk?.score ?? 0;
   const topChunkLexical = bestChunk?.lexicalScore ?? 0;
   const topChunkCosine = bestChunk?.cosineScore ?? 0;
-  const isWiseRelated = hasWiseSignals(userQuestion);
 
-  // These thresholds gate whether a result is answerable and whether it is
-  // confident enough to treat as a supported FAQ.
   const strongMatchThreshold = Number(process.env.WISE_STRONG_MATCH_THRESHOLD || 0.5);
   const weakMatchThreshold = Number(process.env.WISE_WEAK_MATCH_THRESHOLD || 0.34);
   const lexicalSupportThreshold = Number(process.env.WISE_LEXICAL_SUPPORT_THRESHOLD || 0.12);
@@ -580,10 +615,10 @@ export async function resolveTranscript(userQuestion, context = {}) {
 
   if (!answerableMatch) {
     return {
-      category: isWiseRelated ? "wise_unsupported" : "off_topic",
+      category: classification.wiseRelated ? "wise_unsupported" : "off_topic",
       intent: null,
       conversationalType: null,
-      responseText: isWiseRelated
+      responseText: classification.wiseRelated
         ? "I can only help with Wise transfer tracking questions. For this issue, a human support agent is needed."
         : "I only help with Wise transfer tracking questions. If you have a transfer tracking question, please ask it.",
       sourceTitle: null,
@@ -591,7 +626,7 @@ export async function resolveTranscript(userQuestion, context = {}) {
       shouldEndCall: false,
       rationale: `No strong semantic match was found. Top score: ${topScore.toFixed(3)}.`,
       debug: {
-        route: isWiseRelated ? "wise_unsupported" : "off_topic",
+        route: classification.wiseRelated ? "wise_unsupported" : "off_topic",
         topScore,
         topChunks: debugInfo.topChunks,
       },
@@ -603,7 +638,7 @@ export async function resolveTranscript(userQuestion, context = {}) {
     topChunkLexical >= lexicalSupportThreshold * 1.5 ||
     topChunkCosine >= cosineSupportThreshold + 0.08;
 
-  if (!confidentMatch && !isWiseRelated) {
+  if (!confidentMatch && !classification.wiseRelated) {
     return {
       category: "off_topic",
       intent: null,
@@ -629,7 +664,7 @@ export async function resolveTranscript(userQuestion, context = {}) {
 
   const article = relevantChunks[0] || bestArticle.chunk;
   const responseText = await answerFromChunks({
-    userQuestion,
+    userQuestion: searchInput,
     articleTitle: article.articleTitle,
     articleUrl: article.articleUrl,
     chunks: relevantChunks.length ? relevantChunks : [article],
@@ -638,7 +673,7 @@ export async function resolveTranscript(userQuestion, context = {}) {
   return {
     category: "supported_faq",
     intent: article.intent || null,
-    conversationalType: null,
+    conversationalType: classification.subtype === "contextual_followup" ? "contextual_followup" : null,
     responseText: responseText || "Could you tell me your Wise transfer tracking question?",
     sourceTitle: article.articleTitle,
     sourceUrl: article.articleUrl,

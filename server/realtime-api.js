@@ -135,6 +135,9 @@ export async function handleRealtimeApiRequest({ method, pathname, body }) {
               lastCategory: typeof parsed.context.lastCategory === "string" ? parsed.context.lastCategory : null,
               lastSourceTitle: typeof parsed.context.lastSourceTitle === "string" ? parsed.context.lastSourceTitle : null,
               lastSourceUrl: typeof parsed.context.lastSourceUrl === "string" ? parsed.context.lastSourceUrl : null,
+              lastUserQuestion: typeof parsed.context.lastUserQuestion === "string" ? parsed.context.lastUserQuestion : null,
+              lastAssistantText:
+                typeof parsed.context.lastAssistantText === "string" ? parsed.context.lastAssistantText : null,
             }
           : {};
 

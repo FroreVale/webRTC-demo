@@ -33,6 +33,8 @@ type ResolveContext = {
   lastCategory: ResolveResult["category"] | null;
   lastSourceTitle: string | null;
   lastSourceUrl: string | null;
+  lastUserQuestion: string | null;
+  lastAssistantText: string | null;
 };
 
 type RealtimeMessage = {
@@ -79,6 +81,8 @@ function App() {
     lastCategory: null,
     lastSourceTitle: null,
     lastSourceUrl: null,
+    lastUserQuestion: null,
+    lastAssistantText: null,
   });
 
   useEffect(() => {
@@ -104,6 +108,8 @@ function App() {
       lastCategory: null,
       lastSourceTitle: null,
       lastSourceUrl: null,
+      lastUserQuestion: null,
+      lastAssistantText: null,
     };
 
     if (stopTimerRef.current) {
@@ -235,6 +241,8 @@ function App() {
       lastCategory: result.category,
       lastSourceTitle: result.sourceTitle,
       lastSourceUrl: result.sourceUrl,
+      lastUserQuestion: userQuestion,
+      lastAssistantText: result.responseText,
     };
 
     if (result.debug) {
