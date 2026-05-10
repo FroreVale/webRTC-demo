@@ -214,7 +214,7 @@ function App() {
     setSourceUrl(result.sourceUrl);
 
     if (result.debug) {
-      const matchPercent = Math.round(((result.debug.topScore || 0) + 1) * 50);
+      const matchPercent = Math.round(Math.min(1, Math.max(0, result.debug.topScore || 0)) * 100);
       appendLog(`Retriever route: ${result.debug.route}.`);
       appendLog(`Top match score: ${matchPercent}%`);
       for (const [index, item] of result.debug.topChunks.slice(0, 3).entries()) {

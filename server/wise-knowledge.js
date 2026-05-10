@@ -27,6 +27,11 @@ const WISE_CUES = [
   "recipient",
   "bank",
   "payment",
+  "receipt",
+  "pdf",
+  "download",
+  "track",
+  "tracker",
   "payment proof",
   "proof of payment",
   "banking partner",
@@ -414,11 +419,12 @@ async function searchKnowledgeBase(userQuestion) {
   const scored = knowledgeBase.chunks.map((chunk) => ({
     chunk,
     cosineScore: cosineSimilarity(queryEmbedding, chunk.embedding),
-    lexicalScore: lexicalSimilarity(userQuestion, chunk.text),
+    lexicalScore: lexicalSimilarity(userQuestion, chunk.retrievalText),
+    titleScore: lexicalSimilarity(userQuestion, `${chunk.articleTitle}\n${chunk.sectionTitle}`),
   }));
 
   for (const item of scored) {
-    item.score = (item.cosineScore * 0.78) + (item.lexicalScore * 0.22);
+    item.score = (item.cosineScore * 0.72) + (item.lexicalScore * 0.18) + (item.titleScore * 0.1);
   }
 
   scored.sort((left, right) => right.score - left.score);
@@ -445,6 +451,7 @@ function buildDebugInfo(userQuestion, searchResult) {
     score: Number(item.score.toFixed(4)),
     cosine: Number(item.cosineScore.toFixed(4)),
     lexical: Number(item.lexicalScore.toFixed(4)),
+    title: Number(item.titleScore.toFixed(4)),
   }));
 
   return {
@@ -517,14 +524,27 @@ export async function resolveTranscript(userQuestion) {
   const searchResult = await searchKnowledgeBase(userQuestion);
   const { articleMatches, scoredChunks } = searchResult;
   const bestArticle = articleMatches[0] || null;
+  const bestChunk = scoredChunks[0] || null;
   const topScore = bestArticle?.score ?? 0;
+  const topChunkScore = bestChunk?.score ?? 0;
+  const topChunkLexical = bestChunk?.lexicalScore ?? 0;
+  const topChunkCosine = bestChunk?.cosineScore ?? 0;
   const isWiseRelated = hasWiseSignals(userQuestion);
 
-  const strongMatchThreshold = 0.78;
-  const weakMatchThreshold = 0.58;
+  // These thresholds gate whether a result is answerable and whether it is
+  // confident enough to treat as a supported FAQ.
+  const strongMatchThreshold = Number(process.env.WISE_STRONG_MATCH_THRESHOLD || 0.5);
+  const weakMatchThreshold = Number(process.env.WISE_WEAK_MATCH_THRESHOLD || 0.34);
+  const lexicalSupportThreshold = Number(process.env.WISE_LEXICAL_SUPPORT_THRESHOLD || 0.12);
+  const cosineSupportThreshold = Number(process.env.WISE_COSINE_SUPPORT_THRESHOLD || 0.62);
   const debugInfo = buildDebugInfo(userQuestion, searchResult);
 
-  if (!bestArticle || topScore < weakMatchThreshold) {
+  const answerableMatch =
+    Boolean(bestArticle) &&
+    topScore >= weakMatchThreshold &&
+    (topChunkLexical >= lexicalSupportThreshold || topChunkCosine >= cosineSupportThreshold);
+
+  if (!answerableMatch) {
     return {
       category: isWiseRelated ? "wise_unsupported" : "off_topic",
       intent: null,
@@ -544,7 +564,12 @@ export async function resolveTranscript(userQuestion) {
     };
   }
 
-  if (topScore < strongMatchThreshold && !isWiseRelated) {
+  const confidentMatch =
+    topScore >= strongMatchThreshold ||
+    topChunkLexical >= lexicalSupportThreshold * 1.5 ||
+    topChunkCosine >= cosineSupportThreshold + 0.08;
+
+  if (!confidentMatch && !isWiseRelated) {
     return {
       category: "off_topic",
       intent: null,
@@ -565,7 +590,7 @@ export async function resolveTranscript(userQuestion) {
   const relevantChunks = scoredChunks
     .filter((item) => item.chunk.articleUrl === bestArticle.chunk.articleUrl)
     .sort((left, right) => right.score - left.score)
-    .slice(0, 3)
+    .slice(0, 4)
     .map((item) => item.chunk);
 
   const article = relevantChunks[0] || bestArticle.chunk;
@@ -584,7 +609,7 @@ export async function resolveTranscript(userQuestion) {
     sourceTitle: article.articleTitle,
     sourceUrl: article.articleUrl,
     shouldEndCall: false,
-    rationale: `Top semantic match: ${article.articleTitle} (${topScore.toFixed(3)}).`,
+    rationale: `Top semantic match: ${article.articleTitle} (${topScore.toFixed(3)}; chunk ${topChunkScore.toFixed(3)}).`,
     debug: {
       route: "supported_faq",
       topScore,
