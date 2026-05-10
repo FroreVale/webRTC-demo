@@ -100,6 +100,7 @@ const STOPWORDS = new Set([
 const PHRASE_ALIASES = [
   [/\bpdf receipt\b/g, "receipt"],
   [/\btransfer receipt\b/g, "receipt"],
+  [/\btaking longer than the estimate\b/g, "transfer delayed"],
   [/\bunique transaction reference\b/g, "transaction reference"],
   [/\butr\b/g, "transaction reference"],
   [/\bbanking partner reference number\b/g, "transaction reference number"],
@@ -318,6 +319,20 @@ function detectConversationalType(userQuestion) {
   return "none";
 }
 
+function isContextualFollowUp(userQuestion) {
+  const normalized = normalizeText(userQuestion);
+
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /^(yes|yeah|yep|sure|correct|right|exactly|okay|ok)\b/.test(normalized) ||
+    /\b(that's what i'm asking|that's what i mean|that is what i mean|that's it|yes, that's it|yes that's it)\b/.test(normalized) ||
+    /\b(continue|go on|tell me more|explain that|what about that)\b/.test(normalized)
+  );
+}
+
 function conversationResult(conversationalType, rationale) {
   const replies = {
     greeting: "Hello. How can I help with your Wise transfer?",
@@ -508,7 +523,26 @@ async function answerFromChunks({ userQuestion, articleTitle, articleUrl, chunks
   return String(response.output_text || "").trim();
 }
 
-export async function resolveTranscript(userQuestion) {
+export async function resolveTranscript(userQuestion, context = {}) {
+  const hasFollowUpContext = Boolean(context?.lastCategory === "supported_faq" && context?.lastSourceTitle);
+  if (isContextualFollowUp(userQuestion) && hasFollowUpContext) {
+    return {
+      category: "conversational",
+      intent: null,
+      conversationalType: "contextual_followup",
+      responseText: `Understood. We’re still on ${context.lastSourceTitle}. If you want, I can explain the part that matters most.`,
+      sourceTitle: context.lastSourceTitle || null,
+      sourceUrl: context.lastSourceUrl || null,
+      shouldEndCall: false,
+      rationale: "The utterance was a contextual follow-up to the previous supported FAQ.",
+      debug: {
+        route: "conversational",
+        topScore: 0,
+        topChunks: [],
+      },
+    };
+  }
+
   const conversationalType = detectConversationalType(userQuestion);
   if (conversationalType !== "none") {
     return {
@@ -536,7 +570,7 @@ export async function resolveTranscript(userQuestion) {
   const strongMatchThreshold = Number(process.env.WISE_STRONG_MATCH_THRESHOLD || 0.5);
   const weakMatchThreshold = Number(process.env.WISE_WEAK_MATCH_THRESHOLD || 0.34);
   const lexicalSupportThreshold = Number(process.env.WISE_LEXICAL_SUPPORT_THRESHOLD || 0.12);
-  const cosineSupportThreshold = Number(process.env.WISE_COSINE_SUPPORT_THRESHOLD || 0.62);
+  const cosineSupportThreshold = Number(process.env.WISE_COSINE_SUPPORT_THRESHOLD || 0.58);
   const debugInfo = buildDebugInfo(userQuestion, searchResult);
 
   const answerableMatch =

@@ -129,6 +129,14 @@ export async function handleRealtimeApiRequest({ method, pathname, body }) {
     try {
       const parsed = body ? JSON.parse(body) : {};
       const userQuestion = typeof parsed?.userQuestion === "string" ? parsed.userQuestion.trim() : "";
+      const context =
+        parsed && typeof parsed.context === "object" && parsed.context !== null
+          ? {
+              lastCategory: typeof parsed.context.lastCategory === "string" ? parsed.context.lastCategory : null,
+              lastSourceTitle: typeof parsed.context.lastSourceTitle === "string" ? parsed.context.lastSourceTitle : null,
+              lastSourceUrl: typeof parsed.context.lastSourceUrl === "string" ? parsed.context.lastSourceUrl : null,
+            }
+          : {};
 
       if (!userQuestion) {
         return jsonResponse(400, { error: "userQuestion is required." });
@@ -136,7 +144,7 @@ export async function handleRealtimeApiRequest({ method, pathname, body }) {
 
       return jsonResponse(200, {
         ok: true,
-        result: await resolveTranscript(userQuestion),
+        result: await resolveTranscript(userQuestion, context),
       });
     } catch (error) {
       return jsonResponse(500, {

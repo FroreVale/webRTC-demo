@@ -29,6 +29,12 @@ type ResolvePayload = {
   result: ResolveResult;
 };
 
+type ResolveContext = {
+  lastCategory: ResolveResult["category"] | null;
+  lastSourceTitle: string | null;
+  lastSourceUrl: string | null;
+};
+
 type RealtimeMessage = {
   type?: string;
   transcript?: string;
@@ -69,6 +75,11 @@ function App() {
   const queuedTranscriptRef = useRef<{ transcript: string; generation: number } | null>(null);
   const turnGenerationRef = useRef(0);
   const stopTimerRef = useRef<number | null>(null);
+  const lastResolveContextRef = useRef<ResolveContext>({
+    lastCategory: null,
+    lastSourceTitle: null,
+    lastSourceUrl: null,
+  });
 
   useEffect(() => {
     return () => {
@@ -89,6 +100,11 @@ function App() {
     isHandlingTurnRef.current = false;
     queuedTranscriptRef.current = null;
     turnGenerationRef.current = 0;
+    lastResolveContextRef.current = {
+      lastCategory: null,
+      lastSourceTitle: null,
+      lastSourceUrl: null,
+    };
 
     if (stopTimerRef.current) {
       window.clearTimeout(stopTimerRef.current);
@@ -193,7 +209,10 @@ function App() {
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify({ userQuestion }),
+      body: JSON.stringify({
+        userQuestion,
+        context: lastResolveContextRef.current,
+      }),
     });
 
     if (!resolveResponse.ok) {
@@ -212,6 +231,11 @@ function App() {
     setAssistantText(result.responseText);
     setSourceTitle(result.sourceTitle);
     setSourceUrl(result.sourceUrl);
+    lastResolveContextRef.current = {
+      lastCategory: result.category,
+      lastSourceTitle: result.sourceTitle,
+      lastSourceUrl: result.sourceUrl,
+    };
 
     if (result.debug) {
       const matchPercent = Math.round(Math.min(1, Math.max(0, result.debug.topScore || 0)) * 100);
